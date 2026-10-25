@@ -1,0 +1,22 @@
+# web framework
+fastapi
+# server that runs the app
+uvicorn[standard]
+# talks to Supabase PostgreSQL in Python
+sqlalchemy
+# the PostgreSQL driver SQLAlchemy uses
+psycopg[binary]
+# creates and verifies JWTs
+pyjwt
+# password hashing
+bcrypt
+# rate limiting
+slowapi
+# reads the .env file
+python-dotenv
+# lets FastAPI read form data (OAuth2 login sends a form)
+python-multipart
+# HTTP client, used by tests and the demo script
+httpx
+# testing
+pytest
