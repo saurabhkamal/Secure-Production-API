@@ -46,3 +46,6 @@ DEFAULT_RATE_LIMIT = os.getenv("DEFAULT_RATE_LIMIT", "60/minute")  # limit for e
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")  # how much detail to log
 LOG_FILE = os.getenv("LOG_FILE", "logs/app.log")  # log file path
 
+# ---------- Demo users (only used by scripts/seed.py) ----------
+DEMO_USER_PASSWORD = os.getenv("DEMO_USER_PASSWORD")    # password for alice and ben; may be None
+DEMO_ADMIN_PASSWORD = os.getenv("DEMO_ADMIN_PASSWORD")  # password for admin; may be None
