@@ -4,6 +4,11 @@
 # ============================================================
 
 import bcrypt # slow, salted password hashing
+from datetime import datetime, timedelta, timezone  # token issue and expiry times
+import jwt                                           # PyJWT: create and check tokens
+from fastapi import HTTPException, status            # to return 401 errors
+from app import config                               # JWT secret, algorithm, lifetime from .env
+from app.logging_config import logger                # log every failed token check
 
 def hash_password(plain_password: str) -> str:
     """Turn a plain password into a bcrypt hash for storage."""
@@ -21,3 +26,45 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     )
 
 # the verify_password needs no separate salt. bcrypt reads the salt out of the stored hash, 
+
+# JWT access tokens
+
+def create_access_token(user) -> str:
+    """Create a signed token for a user who has just logged in."""
+    now = datetime.now(timezone.utc)                # current time in UTC (never local time)
+    payload = {
+        "sub": user.username,                   # who the token belongs to
+        "role": user.role,                      # for information; the server re-checks the DB
+        "type": "access",                       # marks this as an access token
+        "iat": now,                             # issued at
+        "exp": now + timedelta(minutes=config.ACCESS_TOKEN_EXPIRE_MINUTES), # expires in 15 minutes
+    }
+    return jwt.encode(                          # build header.payload.signature
+        payload,
+        config.JWT_SECRET_KEY,                  # the secret that creates the seal
+        algorithm=config.JWT_ALGORITHM,         # HS256 
+    )
+
+def _unauthorized(reason: str) -> HTTPException:
+    """Log the failure, then build a 401 error to raise."""
+    logger.warning("AUTH FAIL | %s", reason)                 # every rejected token gets logged
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,           # 401 = "we don't know who you are"
+        detail=reason,                                      # the same reason goes to the client
+        headers={"WWW-Authenticate": "Bearer"},             # tells the client to send a Bearer token
+    )
+
+def decode_token(token: str, expected_type: str = "access") -> dict:
+    """check the token's seal, expiry and type. Return its payload, or raise 401"""
+    try:
+        # Check the seal with our secret, accept only our algorithm, and check "exp"
+        payload = jwt.decode(token, config.JWT_SECRET_KEY, algorithms=[config.JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:          # real token, but too old
+        raise _unauthorized("Token has expired")        
+    except jwt.InvalidTokenError:    # forged, edited or garbage
+        raise _unauthorized("Invalid token")
+
+    if payload.get("type") != expected_type:    # real token, but the wrong kind
+        raise _unauthorized(f"Wrong token type: expected {expected_type} token")
+
+    return payload   # all checks passed
