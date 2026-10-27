@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session                             # type label for 
 
 from app.database import get_db, AppUser                       # the users model + one session per request
 from app.logging_config import logger                          # our shared logger
-from app.security import create_access_token, get_current_user, hash_password, verify_password, require_admin                  
+from app.security import create_access_token, get_current_user, hash_password, verify_password, require_admin, require_api_key                  
 
 from fastapi.security import OAuth2PasswordRequestForm   # reads the OAuth2 login form
 
@@ -19,7 +19,7 @@ from decimal import Decimal       # exact type for money
 
 from app.database import AppUser, Transaction, get_db
 import uuid     # type for owner_id
-
+from sqlalchemy import func, select, text 
 
 
 # Create the API object that uvicorn will run
@@ -72,6 +72,15 @@ class TransactionOut(BaseModel):
 class AdminTransactionOut(TransactionOut):
     """Same as TransactionOut, plus who owns it. Only admins ever receive this."""
     owner_id: uuid.UUID | None                                # admins need to see whose transaction it is
+
+
+class LedgerSummaryRow(BaseModel):
+    """One line of the summary: totals for one user, currency and direction. No individual transactions."""
+    username: str                                              # whose totals these are
+    currency: str                                              # e.g. "GBP"
+    direction: str                                             # "debit" or "credit"
+    count: int                                                 # how many transactions
+    total: Decimal                                             # sum of their amounts
 
 
 @app.get("/health", tags=["Public"])                            # GET /health, grouped under "Public" in Swagger
@@ -189,3 +198,26 @@ def all_transactions(
     return db.scalars(
         select(Transaction).order_by(Transaction.created_at.desc())  # no owner filter: everything
     ).all()
+
+
+@app.get("/service/ledger-summary", response_model=list[LedgerSummaryRow], tags=["Service"])
+def ledger_summary(
+    api_key: str = Depends(require_api_key),                   # one line: valid API key required
+    db: Session = Depends(get_db),
+):
+    """Totals per user, currency and direction, for internal reporting services."""
+    rows = db.execute(
+        select(
+            AppUser.username,                                  # who
+            Transaction.currency,                              # which currency
+            Transaction.direction,                             # debit or credit
+            func.count().label("count"),                       # how many
+            func.sum(Transaction.amount).label("total"),       # how much in total
+        )
+        .join(AppUser, AppUser.id == Transaction.owner_id)     # attach each transaction to its owner
+        .group_by(AppUser.username, Transaction.currency, Transaction.direction)  # one row per group
+        .order_by(AppUser.username, Transaction.currency, Transaction.direction)  # tidy order
+    ).all()
+
+    logger.info("SERVICE | ledger summary served (%d rows)", len(rows))
+    return [row._asdict() for row in rows]                     # each row becomes a dictionary

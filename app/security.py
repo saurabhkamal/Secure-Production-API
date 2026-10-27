@@ -13,7 +13,8 @@ from fastapi.security import OAuth2PasswordBearer    # reads Authorization: Bear
 from app.database import AppUser, get_db             # the users table + one session per request
 from sqlalchemy.orm import Session                    # type label for a database session
 from sqlalchemy import select                         # to look up the user
-
+import secrets                                       # compare_digest: constant-time comparison
+from fastapi.security import APIKeyHeader            # add next to your OAuth2PasswordBearer import
 
 
 def hash_password(plain_password: str) -> str:
@@ -104,3 +105,25 @@ def require_admin(user: AppUser = Depends(get_current_user)) -> AppUser:
         )
     return user       # an admin: let them through
 
+
+
+
+# API keys (machine-to-machine)
+
+# Reads the "X-API-Key" header and adds it to Swagger's Authorize popup.
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def _is_valid_key(api_key: str) -> bool:
+    """True if api_key matches any key in .env. constant time"""
+    for valid_key in config.API_KEYS:      # check each allowed key
+        if secrets.compare_digest(api_key.encode(), valid_key.encode()):  # safely checks whether the two keys are identical.
+            return True                 # found a match
+    return False                    # no key matched
+
+def require_api_key(api_key: str | None = Depends(api_key_header)) -> str:
+    """Only callers with a valid X-API-Key pass. Used by /service/* endpoints."""
+    if not api_key:                                                     # header missing or empty
+        raise _unauthorized("Missing API key")
+    if not _is_valid_key(api_key):                                      # header present but wrong
+        raise _unauthorized(f"Invalid API key ending ...{api_key[-4:]}")  # last 4 chars only
+    return api_key          
