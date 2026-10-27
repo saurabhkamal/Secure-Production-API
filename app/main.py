@@ -10,7 +10,10 @@ from sqlalchemy.orm import Session                             # type label for 
 
 from app.database import get_db, AppUser                       # the users model + one session per request
 from app.logging_config import logger                          # our shared logger
-from app.security import hash_password                        # bcrypt hashing from Step 1
+from app.security import create_access_token, get_current_user, hash_password, verify_password                  
+
+from fastapi.security import OAuth2PasswordRequestForm   # reads the OAuth2 login form
+
 
 # Create the API object that uvicorn will run
 
@@ -36,6 +39,14 @@ class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     username: str
     role: str
+
+
+# TokenResponse makes sure the reply looks exactly like this
+class TokenResponse(BaseModel):
+    """What a successful login returns (the OAuth2 standard format)."""
+    access_token: str           # the JWT
+    token_type: str = "bearer"   # tells the client how to send it (send this token as bearer token)
+                                 # So, on every request the client adds: Authorization: Bearer eyJhbGciOiJIUzI1NiIs...
 
 
 @app.get("/health", tags=["Public"])                            # GET /health, grouped under "Public" in Swagger
@@ -79,3 +90,54 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
     logger.info("REGISTER | user=%s", user.username)     # log the username, never the password
     return user                                          # UserOut strips everything but username + role
 
+
+# Register this function to handle POST /auth/token; shape the reply like TokenResponse; group it under "Auth" in Swagger
+@app.post("/auth/token", response_model=TokenResponse, tags=["Auth"])
+def login(
+    # FastAPI reads the login form for us: form_data.username and form_data.password
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    # FastAPI opens a database session for us
+    db: Session = Depends(get_db),
+):
+    """OAuth2 password flow: username + password in, access token out."""
+
+    # Ask Supabase for the user with this username; gives their row, or None if no such user
+    user = db.scalar(select(AppUser).where(AppUser.username == form_data.username))
+
+    # Fail if the user doesn't exist OR the password doesn't match the stored bcrypt hash
+    if user is None or not verify_password(form_data.password, user.hashed_password):
+
+        # Write a warning to the log: which username failed (never the password)
+        logger.warning("LOGIN FAIL | username=%s", form_data.username)
+
+        # Stop here and send an error back to the client
+        raise HTTPException(
+            # 401 = "we couldn't confirm who you are"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            # The same message for "no such user" and "wrong password", so attackers learn nothing
+            detail="Incorrect username or password",
+            # Standard OAuth2 hint telling the client to use Bearer tokens
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # We only reach this line if the username exists AND the password was correct
+    logger.info("LOGIN OK | user=%s", user.username)
+
+    # Make a signed JWT for this user and send it back in the standard OAuth2 shape
+    return {"access_token": create_access_token(user), "token_type": "bearer"}
+
+
+# Register this function to handle GET /users/me; shape the reply like UserOut; group it under "Users"
+@app.get("/users/me", response_model=UserOut, tags=["Users"])
+
+# Before running, FastAPI runs the guard: token from header → check it → find the user in Supabase.
+# If any of that fails, the guard returns 401 and this function never runs.
+def read_me(user: AppUser = Depends(get_current_user)):
+    """Who am I? Requires a valid access token."""
+
+    # Send back the verified user; UserOut keeps only username and role (the hash is dropped)
+    return user
+
+# /users/me has no user ID in the URL. The server works out who you are from your token, so 
+# so alice can never ask for someone else’s profile by changing a number in the URL.
+# The same idea protects /transactions/me

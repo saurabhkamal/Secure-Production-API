@@ -6,9 +6,15 @@
 import bcrypt # slow, salted password hashing
 from datetime import datetime, timedelta, timezone  # token issue and expiry times
 import jwt                                           # PyJWT: create and check tokens
-from fastapi import HTTPException, status            # to return 401 errors
+from fastapi import HTTPException, status, Depends            # to return 401 errors
 from app import config                               # JWT secret, algorithm, lifetime from .env
 from app.logging_config import logger                # log every failed token check
+from fastapi.security import OAuth2PasswordBearer    # reads Authorization: Bearer... headers
+from app.database import AppUser, get_db             # the users table + one session per request
+from sqlalchemy.orm import Session                    # type label for a database session
+from sqlalchemy import select                         # to look up the user
+
+
 
 def hash_password(plain_password: str) -> str:
     """Turn a plain password into a bcrypt hash for storage."""
@@ -68,3 +74,23 @@ def decode_token(token: str, expected_type: str = "access") -> dict:
         raise _unauthorized(f"Wrong token type: expected {expected_type} token")
 
     return payload   # all checks passed
+
+# OAuth2: the guard for protected endpoints
+# Reads "Authorization: Bearer <token>" and adds Swagger's Authorize button.
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")  # tokenUrl tells Swagger where to send the username and password.
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> AppUser:
+    # the token from the header, and a database session
+    """Any endpoint that depends on this requires a valid access token."""
+    payload = decode_token(token)
+    user = db.scalar(select(AppUser).where(AppUser.username == payload["sub"]))
+
+    if user is None:
+        raise _unauthorized("User no longer exists")
+    return user
+
+# get_current_user takes the token from the header, checks it, finds the matching user in Supabase, and gives that user to the 
+# endpoint
+
+
