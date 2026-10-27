@@ -93,4 +93,14 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 # get_current_user takes the token from the header, checks it, finds the matching user in Supabase, and gives that user to the 
 # endpoint
 
+# Role-based access control
+def require_admin(user: AppUser = Depends(get_current_user)) -> AppUser:
+    """Only admins pass. First checks the token (401), then the role (403)."""
+    if user.role != "admin":          # role from the database, not the token
+        logger.warning("ACCESS DENIED | user=%s role=%s needed=admin", user.username, user.role)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient permissions"          
+        )
+    return user       # an admin: let them through
 

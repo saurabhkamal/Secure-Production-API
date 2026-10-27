@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session                             # type label for 
 
 from app.database import get_db, AppUser                       # the users model + one session per request
 from app.logging_config import logger                          # our shared logger
-from app.security import create_access_token, get_current_user, hash_password, verify_password                  
+from app.security import create_access_token, get_current_user, hash_password, verify_password, require_admin                  
 
 from fastapi.security import OAuth2PasswordRequestForm   # reads the OAuth2 login form
 
@@ -18,6 +18,8 @@ from datetime import datetime     # type for created_at
 from decimal import Decimal       # exact type for money
 
 from app.database import AppUser, Transaction, get_db
+import uuid     # type for owner_id
+
 
 
 # Create the API object that uvicorn will run
@@ -65,6 +67,11 @@ class TransactionOut(BaseModel):
     merchant: str                                            # who was paid / who paid
     description: str | None                                  # may be empty
     created_at: datetime                                     # when it happened
+
+
+class AdminTransactionOut(TransactionOut):
+    """Same as TransactionOut, plus who owns it. Only admins ever receive this."""
+    owner_id: uuid.UUID | None                                # admins need to see whose transaction it is
 
 
 @app.get("/health", tags=["Public"])                            # GET /health, grouped under "Public" in Swagger
@@ -170,3 +177,15 @@ def my_transactions(user: AppUser = Depends(get_current_user), db: Session = Dep
         .where(Transaction.owner_id == user.id)             # ONLY rows owned by this user
         .order_by(Transaction.created_at.desc())            # newest first
     ).all()                                                 # a list; each row filtered through TransactionOut
+
+
+@app.get("/admin/transactions", response_model=list[AdminTransactionOut], tags=["Admin"])
+def all_transactions(
+    admin: AppUser = Depends(require_admin),                  # one line: admins only
+    db: Session = Depends(get_db),
+):
+    """Every transaction from every user. Admins only."""
+    logger.info("ADMIN | user=%s viewed all transactions", admin.username)  # admin actions are audited
+    return db.scalars(
+        select(Transaction).order_by(Transaction.created_at.desc())  # no owner filter: everything
+    ).all()
