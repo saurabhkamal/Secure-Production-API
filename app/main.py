@@ -14,6 +14,11 @@ from app.security import create_access_token, get_current_user, hash_password, v
 
 from fastapi.security import OAuth2PasswordRequestForm   # reads the OAuth2 login form
 
+from datetime import datetime     # type for created_at
+from decimal import Decimal       # exact type for money
+
+from app.database import AppUser, Transaction, get_db
+
 
 # Create the API object that uvicorn will run
 
@@ -47,6 +52,19 @@ class TokenResponse(BaseModel):
     access_token: str           # the JWT
     token_type: str = "bearer"   # tells the client how to send it (send this token as bearer token)
                                  # So, on every request the client adds: Authorization: Bearer eyJhbGciOiJIUzI1NiIs...
+
+
+class TransactionOut(BaseModel):
+    """What we send back for each transaction. owner_id is deliberately left out."""
+    model_config = ConfigDict(from_attributes=True)         # build it from a database row
+    reference: str                                           # e.g. "INV-100"
+    amount: Decimal                                          # exact money value
+    currency: str                                            # e.g. "GBP"
+    direction: str                                           # "debit" or "credit"
+    status: str                                              # e.g. "completed"
+    merchant: str                                            # who was paid / who paid
+    description: str | None                                  # may be empty
+    created_at: datetime                                     # when it happened
 
 
 @app.get("/health", tags=["Public"])                            # GET /health, grouped under "Public" in Swagger
@@ -141,3 +159,14 @@ def read_me(user: AppUser = Depends(get_current_user)):
 # /users/me has no user ID in the URL. The server works out who you are from your token, so 
 # so alice can never ask for someone else’s profile by changing a number in the URL.
 # The same idea protects /transactions/me
+
+@app.get("/transactions/me", response_model=list[TransactionOut], tags=["Transactions"])
+def my_transactions(user: AppUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    # who is asking: from the token, never the URL and database session
+    
+    """The logged-in user's own transactions, newest first."""
+    return db.scalars(
+        select(Transaction)
+        .where(Transaction.owner_id == user.id)             # ONLY rows owned by this user
+        .order_by(Transaction.created_at.desc())            # newest first
+    ).all()                                                 # a list; each row filtered through TransactionOut
