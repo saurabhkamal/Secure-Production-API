@@ -1,0 +1,9 @@
+   <!doctype html>
+   <h1>CORS demo</h1>
+   <pre id="out">Calling the API...</pre>
+   <script>
+     fetch("http://127.0.0.1:8000/health")
+       .then(r => r.json())
+       .then(data => out.textContent = "SUCCESS: " + JSON.stringify(data))
+       .catch(err => out.textContent = "BLOCKED by CORS: " + err);
+   </script>
