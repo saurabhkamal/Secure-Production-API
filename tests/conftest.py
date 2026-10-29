@@ -33,6 +33,11 @@ def alice(client):
     """alice's access and refresh tokens."""
     return login(client, "alice", config.DEMO_USER_PASSWORD).json()
 
+@pytest.fixture
+def admin(client):
+    """admin's access and refresh tokens."""
+    return login(client, "admin", config.DEMO_ADMIN_PASSWORD).json()
+
 
 @pytest.fixture
 def new_username():
