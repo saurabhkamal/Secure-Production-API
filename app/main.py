@@ -10,7 +10,15 @@ from sqlalchemy.orm import Session                             # type label for 
 
 from app.database import get_db, AppUser                       # the users model + one session per request
 from app.logging_config import logger                          # our shared logger
-from app.security import create_access_token, get_current_user, hash_password, verify_password, require_admin, require_api_key                  
+from app.security import (
+    create_access_token, 
+    get_current_user, 
+    hash_password, 
+    verify_password, 
+    require_admin, 
+    require_api_key,
+    burn_refresh_token,
+    create_refresh_token)                  
 
 from fastapi.security import OAuth2PasswordRequestForm   # reads the OAuth2 login form
 
@@ -99,9 +107,14 @@ class UserOut(BaseModel):
 # TokenResponse makes sure the reply looks exactly like this
 class TokenResponse(BaseModel):
     """What a successful login returns (the OAuth2 standard format)."""
-    access_token: str           # the JWT
+    access_token: str           # 15-minute token for API calls
+    refresh_token: str          # 7-day token for getting new tokens
     token_type: str = "bearer"   # tells the client how to send it (send this token as bearer token)
                                  # So, on every request the client adds: Authorization: Bearer eyJhbGciOiJIUzI1NiIs...
+
+class RefreshRequest(BaseModel):
+    """Body for /auth/refresh and /auth/logout."""
+    refresh_token: str
 
 
 class TransactionOut(BaseModel):
@@ -129,6 +142,7 @@ class LedgerSummaryRow(BaseModel):
     direction: str                                             # "debit" or "credit"
     count: int                                                 # how many transactions
     total: Decimal                                             # sum of their amounts
+
 
 
 @app.get("/health", tags=["Public"])                            # GET /health, grouped under "Public" in Swagger
@@ -208,7 +222,11 @@ def login(
     logger.info("LOGIN OK | user=%s", user.username)
 
     # Make a signed JWT for this user and send it back in the standard OAuth2 shape
-    return {"access_token": create_access_token(user), "token_type": "bearer"}
+    return {
+        "access_token": create_access_token(user), 
+        "refresh_token": create_refresh_token(user),
+        "token_type": "bearer"
+        }
 
 
 # Register this function to handle GET /users/me; shape the reply like UserOut; group it under "Users"
@@ -271,3 +289,32 @@ def ledger_summary(
 
     logger.info("SERVICE | ledger summary served (%d rows)", len(rows))
     return [row._asdict() for row in rows]                     # each row becomes a dictionary
+
+# This endpoint
+# Suppose for e.g. When alice's access token has expired, her app sends her refresh token.
+# The server checks it, voids it, and hands back a fresh pair of tokens, so she stays
+# logged in without typing her password.
+@app.post("/auth/refresh", response_model=TokenResponse, tags=["Auth"])
+def refresh(body: RefreshRequest, db: Session = Depends(get_db)):
+    """Swap a refresh token for a NEW access + refresh pair. The old refresh token is voided."""
+    user = burn_refresh_token(db, body.refresh_token)    # check the refresh tokens (genuine, expired), 
+                                                         # if any check fails, 401 raised and below lines never run
+    logger.info("TOKEN REFRESH | user=%s", user.username)
+
+    # Send bank brand new pair of tokens
+    return {
+        "access_token": create_access_token(user),       # fresh 15-minute token
+        "refresh_token": create_refresh_token(user),     # fresh 7-day token (rotation)
+        "token_type": "bearer",                          # tells the app to send it as "Bearer <token>"
+    }
+
+# This endpoint
+# The website or app calls it when alice clicks logout. 
+# For e.g. It voids the refresh token, so it can never be used to get new access tokens again.
+# That ends the user's session
+@app.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT, tags=["Auth"])
+def logout(body: RefreshRequest, db: Session = Depends(get_db)):
+    """Log out: void the refresh token so no new access tokens can be obtained."""
+    user = burn_refresh_token(db, body.refresh_token)    # same check + void, no new tokens given
+    logger.info("LOGOUT | user=%s", user.username)
+    # 204 = "done, nothing to send back"

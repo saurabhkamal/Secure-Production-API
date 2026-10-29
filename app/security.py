@@ -10,11 +10,13 @@ from fastapi import HTTPException, status, Depends            # to return 401 er
 from app import config                               # JWT secret, algorithm, lifetime from .env
 from app.logging_config import logger                # log every failed token check
 from fastapi.security import OAuth2PasswordBearer    # reads Authorization: Bearer... headers
-from app.database import AppUser, get_db             # the users table + one session per request
+from app.database import AppUser, get_db, RevokedToken   # the users table + one session per request
 from sqlalchemy.orm import Session                    # type label for a database session
 from sqlalchemy import select                         # to look up the user
 import secrets                                       # compare_digest: constant-time comparison
 from fastapi.security import APIKeyHeader            # add next to your OAuth2PasswordBearer import
+import uuid                                          # makes each token's unique ID (jti)
+
 
 
 def hash_password(plain_password: str) -> str:
@@ -36,21 +38,27 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 # JWT access tokens
 
-def create_access_token(user) -> str:
-    """Create a signed token for a user who has just logged in."""
-    now = datetime.now(timezone.utc)                # current time in UTC (never local time)
+def _create_token(user, token_type: str, lifetime: timedelta) -> str:
+    """Build and sign one token of the given type and lifetime."""
+    now = datetime.now(timezone.utc)
     payload = {
-        "sub": user.username,                   # who the token belongs to
-        "role": user.role,                      # for information; the server re-checks the DB
-        "type": "access",                       # marks this as an access token
-        "iat": now,                             # issued at
-        "exp": now + timedelta(minutes=config.ACCESS_TOKEN_EXPIRE_MINUTES), # expires in 15 minutes
+        "sub": user.username,                        # who the token belongs to
+        "role": user.role,                           # for information only
+        "type": token_type,                          # "access" or "refresh"
+        "iat": now,                                  # issued at
+        "exp": now + lifetime,                       # expires at
+        "jti": uuid.uuid4().hex,                     # unique ID, so this exact token can be revoked
     }
-    return jwt.encode(                          # build header.payload.signature
-        payload,
-        config.JWT_SECRET_KEY,                  # the secret that creates the seal
-        algorithm=config.JWT_ALGORITHM,         # HS256 
-    )
+    return jwt.encode(payload, config.JWT_SECRET_KEY, algorithm=config.JWT_ALGORITHM)
+
+def create_access_token(user) -> str:
+    """Short-lived token (15 min) for calling the API."""
+    return _create_token(user, "access", timedelta(minutes=config.ACCESS_TOKEN_EXPIRE_MINUTES))
+
+
+def create_refresh_token(user) -> str:
+    """Long-lived token (7 days) used ONLY to get new tokens."""
+    return _create_token(user, "refresh", timedelta(days=config.REFRESH_TOKEN_EXPIRE_DAYS))
 
 def _unauthorized(reason: str) -> HTTPException:
     """Log the failure, then build a 401 error to raise."""
@@ -127,3 +135,21 @@ def require_api_key(api_key: str | None = Depends(api_key_header)) -> str:
     if not _is_valid_key(api_key):                                      # header present but wrong
         raise _unauthorized(f"Invalid API key ending ...{api_key[-4:]}")  # last 4 chars only
     return api_key          
+
+
+# Refresh tokens: each works once, then it's revoked
+def burn_refresh_token(db: Session, refresh_token: str) -> AppUser:
+    """Check a refresh token, revoke it so it can't be reused, and return its user."""
+    payload = decode_token(refresh_token, expected_type="refresh")   # seal, expiry, type (401 if bad)
+
+    if db.get(RevokedToken, payload["jti"]):         # is its ID already in revoked_tokens?
+        raise _unauthorized("Refresh token has been revoked")
+
+    user = db.scalar(select(AppUser).where(AppUser.username == payload["sub"]))  # load the user
+    if user is None:
+        raise _unauthorized("User no longer exists")
+
+    db.add(RevokedToken(jti=payload["jti"]))         # punch it "VOID"
+    db.commit()                                      # save to Supabase
+    return user                                      # the caller decides what happens next
+
