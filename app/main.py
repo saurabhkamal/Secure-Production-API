@@ -3,7 +3,7 @@
 # Run with:  python -m uvicorn app.main:app --reload
 # ============================================================
 
-from fastapi import Depends, FastAPI, HTTPException, status    # FastAPI building blocks
+from fastapi import Depends, FastAPI, HTTPException, status, Request    # FastAPI building blocks
 from pydantic import BaseModel, ConfigDict, Field              # request/response validation
 from sqlalchemy import text, select                            # select = build queries; text = raw SQL
 from sqlalchemy.orm import Session                             # type label for a database session
@@ -21,6 +21,16 @@ from app.database import AppUser, Transaction, get_db
 import uuid     # type for owner_id
 from sqlalchemy import func, select, text 
 
+from fastapi.middleware.cors import CORSMiddleware     # adds CORS headers to replies
+from app import config                                 # CORS_ORIGINS from .env
+
+from fastapi.responses import JSONResponse             # to build 429 reply
+from slowapi import Limiter                            # the rate limiter
+from slowapi.errors import RateLimitExceeded           # raised when a limit is hit
+from slowapi.middleware import SlowAPIMiddleware       # applies the default limit to every endpoint
+from slowapi.util import get_remote_address            # identifies callers by IP address
+
+
 
 # Create the API object that uvicorn will run
 
@@ -29,6 +39,44 @@ app = FastAPI(
     description="A PayLink ledger API secured with JWT, OAuth2, API keys and more.",
     version = "0.1.0"
 )
+
+# Rate Limiting: count requests per IP address
+limiter = Limiter(
+    key_func=get_remote_address,                  # count separately for each IP address
+    default_limits=[config.DEFAULT_RATE_LIMIT]    # 60/minute for every endpoint, from .env
+)
+app.state.limiter = limiter                       # slowapi - rate limiting looks for the limiter
+app.add_middleware(SlowAPIMiddleware)             # enforce the default limit on every request
+
+@app.exception_handler(RateLimitExceeded)                         # runs whenever any limit is hit
+def rate_limit_exceeded(request: Request, exc: RateLimitExceeded):
+    """Log the event and reply with a clean 429."""
+    logger.warning("RATE LIMIT | ip=%s path=%s limit=%s",
+                   get_remote_address(request), request.url.path, exc.detail)
+    return JSONResponse(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,            # 429 = "slow down"
+        content={"detail": f"Rate limit exceeded: {exc.detail}"}, # e.g. "5 per 1 minute"
+        headers={"Retry-After": "60"},                            # tell the client how long to wait
+    )
+    # 2026-10-29 07:35:12 | WARNING | RATE LIMIT | ip=127.0.0.1 path=/auth/token limit=5 per 1 minute
+
+# By adding the rate limiter first and CORS after it, CORS sits on the outside and adds its headers to every reply, including 429s
+# Whatever layer creates a reply, that reply only gets CORS’s note if it travels back through CORS. So CORS must be the outermost layer, which means adding it last.
+
+
+# CORS: which browser origins may read our replies
+app.add_middleware(
+    CORSMiddleware,                                       # only the websites listed in .env
+    allow_origins=config.CORS_ORIGINS,                     # only the websites listed in .env
+    allow_methods = ["GET", "POST"],                       # only the methods this API uses
+    allow_headers=["Authorization", "Content-Type"],       # NOT X-API-Key: keys never belong in browsers
+    allow_credentials=False,                               # we use Bearer tokens, not cookies
+)
+
+logger.info("CORS | allowed origins: %s", config.CORS_ORIGINS)
+
+# Middleware is code that runs on every request and reply, before and after the endpoints.
+# The endpoints don't change at all; the middleware adds the CORS headers on the way out.
 
 logger.info("STARTUP | Secure Production API loaded")           # one line each time the app starts
 
@@ -102,8 +150,8 @@ def health(db: Session = Depends(get_db)):                      # FastAPI opens 
           status_code=status.HTTP_201_CREATED,   # 201 = "a new resource was created"
           tags=["Auth"],                         # Swagger group
 )
-
-def register(body: RegisterRequest, db: Session = Depends(get_db)):
+@limiter.limit(config.LOGIN_RATE_LIMIT)          # 5/minute per IP
+def register(request: Request, body: RegisterRequest, db: Session = Depends(get_db)):
     """Create a normal user. The password is hashed before it is stored."""
     existing = db.scalar(select(AppUser). where(AppUser.username == body.username)) 
     # look for a user with this username
@@ -127,7 +175,9 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
 
 # Register this function to handle POST /auth/token; shape the reply like TokenResponse; group it under "Auth" in Swagger
 @app.post("/auth/token", response_model=TokenResponse, tags=["Auth"])
+@limiter.limit(config.LOGIN_RATE_LIMIT)            #  5/minute per IP
 def login(
+    request: Request,               # slowapi reads the IP from this
     # FastAPI reads the login form for us: form_data.username and form_data.password
     form_data: OAuth2PasswordRequestForm = Depends(),
     # FastAPI opens a database session for us
